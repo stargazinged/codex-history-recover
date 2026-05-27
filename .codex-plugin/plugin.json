@@ -1,0 +1,25 @@
+{
+  "name": "codex-history-recover",
+  "version": "0.1.0+codex.20260527185456",
+  "description": "Restore local Codex conversation history after switching API providers or keys.",
+  "author": {
+    "name": "Codex History Recover Maintainers"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex History Recover",
+    "shortDescription": "Show local Codex history after account switches.",
+    "longDescription": "Scans local Codex rollout files and rebuilds the local thread index so conversations remain visible after switching request URLs, API keys, or model providers. It creates backups before writing Codex state.",
+    "developerName": "Codex History Recover Maintainers",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Recover my local Codex history",
+      "Show hidden Codex conversations"
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

@@ -1,0 +1,16 @@
+# Local Codex data and generated backups. Never publish these.
+backups/
+*.sqlite
+*.sqlite-*
+*.db
+*.jsonl
+
+# Python/runtime artifacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local editor and OS files.
+.DS_Store
+.env
+.env.*

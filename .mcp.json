@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "codex-history-recover": {
+      "command": "python3",
+      "args": [
+        "./scripts/history_recover_mcp.py"
+      ],
+      "cwd": "."
+    }
+  }
+}
