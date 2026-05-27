@@ -1,6 +1,6 @@
 {
   "name": "codex-history-recover",
-  "version": "0.1.0+codex.20260527185456",
+  "version": "0.1.0",
   "description": "Restore local Codex conversation history after switching API providers or keys.",
   "author": {
     "name": "Codex History Recover Maintainers"
