@@ -208,6 +208,7 @@ def rollout_id_from_path(path: Path) -> str | None:
 
 def scan_rollout(
     path: Path,
+    archived: bool,
     title_index: dict[str, str],
     config: dict[str, str],
     align_provider: bool,
@@ -299,8 +300,8 @@ def scan_rollout(
         "approval_mode": approval_mode,
         "tokens_used": tokens_used,
         "has_user_event": 1 if first_user_message else 0,
-        "archived": 0,
-        "archived_at": None,
+        "archived": 1 if archived else 0,
+        "archived_at": updated_ms // 1000 if archived else None,
         "git_sha": None,
         "git_branch": None,
         "git_origin_url": None,
@@ -319,11 +320,16 @@ def scan_rollout(
     }
 
 
-def discover_rollouts(codex_home: Path) -> list[Path]:
-    sessions_dir = codex_home / "sessions"
-    if not sessions_dir.exists():
-        return []
-    return sorted(sessions_dir.rglob("rollout-*.jsonl"))
+def discover_rollouts(codex_home: Path) -> list[tuple[Path, bool]]:
+    roots = [
+        (codex_home / "sessions", False),
+        (codex_home / "archived_sessions", True),
+    ]
+    rollouts: list[tuple[Path, bool]] = []
+    for root, archived in roots:
+        if root.exists():
+            rollouts.extend((path, archived) for path in root.rglob("rollout-*.jsonl"))
+    return sorted(rollouts, key=lambda item: str(item[0]))
 
 
 def writable_backup_dir(codex_home: Path) -> Path:
@@ -418,8 +424,13 @@ def merge_existing(
     merged["updated_at_ms"] = max(existing.get("updated_at_ms") or 0, record["updated_at_ms"])
     merged["tokens_used"] = max(existing.get("tokens_used") or 0, record.get("tokens_used") or 0)
     merged["has_user_event"] = max(existing.get("has_user_event") or 0, record.get("has_user_event") or 0)
-    merged["archived"] = 0
-    merged["archived_at"] = None
+    record_archived = 1 if record.get("archived") else 0
+    merged["archived"] = record_archived
+    merged["archived_at"] = (
+        existing.get("archived_at") or record.get("archived_at")
+        if record_archived
+        else None
+    )
 
     if align_provider and record.get("model_provider"):
         merged["model_provider"] = record["model_provider"]
@@ -433,13 +444,20 @@ def update_threads(
     codex_home: Path,
     records: list[dict[str, Any]],
     align_provider: bool,
+    current_provider: str | None,
     dry_run: bool,
 ) -> dict[str, int]:
     db_path = codex_home / "state_5.sqlite"
     if not db_path.exists():
         raise RuntimeError(f"Codex state database not found: {db_path}")
 
-    stats = {"inserted": 0, "updated": 0, "provider_aligned": 0}
+    stats = {
+        "inserted": 0,
+        "updated": 0,
+        "provider_aligned": 0,
+        "orphan_provider_aligned": 0,
+    }
+    provider_aligned_ids: set[str] = set()
     conn = sqlite3.connect(str(db_path), timeout=10)
     conn.row_factory = sqlite3.Row
     try:
@@ -462,6 +480,7 @@ def update_threads(
             desired = merge_existing(existing, record, align_provider)
             if existing.get("model_provider") != desired.get("model_provider"):
                 stats["provider_aligned"] += 1
+                provider_aligned_ids.add(record["id"])
             changed_columns = [
                 column
                 for column in THREAD_COLUMNS
@@ -475,6 +494,25 @@ def update_threads(
                 values = [desired.get(column) for column in changed_columns]
                 values.append(record["id"])
                 conn.execute(f"update threads set {set_clause} where id = ?", values)
+
+        if align_provider and current_provider:
+            remaining_ids = [
+                row[0]
+                for row in conn.execute(
+                    "select id from threads where model_provider != ?",
+                    (current_provider,),
+                ).fetchall()
+                if row[0] not in provider_aligned_ids
+            ]
+            stats["orphan_provider_aligned"] = len(remaining_ids)
+            stats["provider_aligned"] += len(remaining_ids)
+            stats["updated"] += len(remaining_ids)
+            if not dry_run:
+                for thread_id in remaining_ids:
+                    conn.execute(
+                        "update threads set model_provider = ? where id = ?",
+                        (current_provider, thread_id),
+                    )
 
         if not dry_run:
             conn.commit()
@@ -501,8 +539,9 @@ def update_session_index(
                 if isinstance(thread_id, str):
                     existing[thread_id] = item
 
+    active_records = [record for record in records if not record.get("archived")]
     changed = 0
-    for record in records:
+    for record in active_records:
         thread_id = record["id"]
         item = {
             "id": thread_id,
@@ -521,6 +560,43 @@ def update_session_index(
     return {"session_index_changed": changed}
 
 
+def inspect_threads(
+    codex_home: Path,
+    current_provider: str | None,
+) -> dict[str, Any]:
+    db_path = codex_home / "state_5.sqlite"
+    if not db_path.exists():
+        return {
+            "thread_count": 0,
+            "provider_counts": {},
+            "remaining_provider_mismatches": 0,
+        }
+
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        provider_counts = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "select model_provider, count(*) from threads group by model_provider"
+            ).fetchall()
+        }
+        thread_count = sum(provider_counts.values())
+        remaining = 0
+        if current_provider:
+            remaining = conn.execute(
+                "select count(*) from threads where model_provider != ?",
+                (current_provider,),
+            ).fetchone()[0]
+    finally:
+        conn.close()
+
+    return {
+        "thread_count": thread_count,
+        "provider_counts": provider_counts,
+        "remaining_provider_mismatches": remaining,
+    }
+
+
 def run_sync(args: argparse.Namespace) -> dict[str, Any]:
     codex_home = Path(args.codex_home).expanduser().resolve()
     config = parse_config(codex_home)
@@ -531,24 +607,30 @@ def run_sync(args: argparse.Namespace) -> dict[str, Any]:
 
     records: list[dict[str, Any]] = []
     skipped = 0
-    for path in rollouts:
-        record = scan_rollout(path, title_index, config, align_provider)
+    active_rollouts = sum(1 for _, archived in rollouts if not archived)
+    archived_rollouts = sum(1 for _, archived in rollouts if archived)
+
+    for path, archived in rollouts:
+        record = scan_rollout(path, archived, title_index, config, align_provider)
         if record is None:
             skipped += 1
         else:
             records.append(record)
 
-    thread_stats = update_threads(codex_home, records, align_provider, True)
+    thread_stats = update_threads(codex_home, records, align_provider, current_provider, True)
     index_stats = update_session_index(codex_home, records, True)
     needs_write = any(
-        thread_stats[key] > 0 for key in ("inserted", "updated", "provider_aligned")
+        thread_stats[key] > 0
+        for key in ("inserted", "updated", "provider_aligned", "orphan_provider_aligned")
     ) or index_stats["session_index_changed"] > 0
 
     backups: list[str] = []
     if not args.dry_run and needs_write:
         backups = backup_state(codex_home, False)
-        thread_stats = update_threads(codex_home, records, align_provider, False)
+        thread_stats = update_threads(codex_home, records, align_provider, current_provider, False)
         index_stats = update_session_index(codex_home, records, False)
+
+    inspection = inspect_threads(codex_home, current_provider)
 
     return {
         "codex_home": str(codex_home),
@@ -556,10 +638,13 @@ def run_sync(args: argparse.Namespace) -> dict[str, Any]:
         "align_provider": align_provider,
         "dry_run": args.dry_run,
         "scanned_rollouts": len(rollouts),
+        "active_rollouts": active_rollouts,
+        "archived_rollouts": archived_rollouts,
         "valid_threads": len(records),
         "skipped_rollouts": skipped,
         **thread_stats,
         **index_stats,
+        **inspection,
         "backups": backups,
     }
 
@@ -572,7 +657,8 @@ def print_summary(summary: dict[str, Any], as_json: bool, quiet: bool) -> None:
     line = (
         f"Codex history sync: {summary['valid_threads']} local threads scanned, "
         f"{summary['inserted']} inserted, {summary['updated']} updated, "
-        f"{summary['provider_aligned']} aligned to provider {provider}."
+        f"{summary['provider_aligned']} aligned to provider {provider}, "
+        f"{summary['remaining_provider_mismatches']} provider mismatches remain."
     )
     print(line)
     if quiet:

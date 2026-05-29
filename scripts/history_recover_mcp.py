@@ -10,19 +10,20 @@ from typing import Any
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SYNC_SCRIPT = PLUGIN_ROOT / "scripts" / "sync_history.py"
-SERVER_INFO = {"name": "codex-history-recover", "version": "0.1.0"}
+SERVER_INFO = {"name": "codex-history-recover", "version": "0.1.1"}
 
 
-def run_sync(*, dry_run: bool = False, align_provider: bool = True) -> str:
+def run_sync(*, dry_run: bool = False, align_provider: bool = True) -> tuple[bool, str]:
     args = [sys.executable, str(SYNC_SCRIPT), "--json"]
     if dry_run:
         args.append("--dry-run")
     if not align_provider:
         args.append("--no-align-provider")
     result = subprocess.run(args, text=True, capture_output=True, timeout=30)
+    output = (result.stdout or result.stderr or "sync failed").strip()
     if result.returncode != 0:
-        return (result.stderr or result.stdout or "sync failed").strip()
-    return result.stdout.strip()
+        return False, output
+    return True, output
 
 
 def read_message() -> dict[str, Any] | None:
@@ -112,10 +113,10 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
         arguments = params.get("arguments") or {}
         dry_run = bool(arguments.get("dry_run", False))
         align_provider = bool(arguments.get("align_provider", True))
-        output = run_sync(dry_run=dry_run, align_provider=align_provider)
+        ok, output = run_sync(dry_run=dry_run, align_provider=align_provider)
         return result(
             message_id,
-            {"content": [{"type": "text", "text": output}], "isError": False},
+            {"content": [{"type": "text", "text": output}], "isError": not ok},
         )
 
     if method in {"resources/list", "prompts/list"}:
@@ -128,7 +129,9 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
 def main() -> int:
     # Plugin startup is the automatic part: when Codex starts this MCP server, the
     # local history index is repaired before the server begins handling requests.
-    run_sync(dry_run=False, align_provider=True)
+    ok, output = run_sync(dry_run=False, align_provider=True)
+    if not ok:
+        print(f"codex-history-recover startup sync failed: {output}", file=sys.stderr)
     while True:
         message = read_message()
         if message is None:

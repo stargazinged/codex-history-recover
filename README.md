@@ -12,11 +12,14 @@ rollout files and rebuilds the visible thread index.
 
 ## What It Does
 
-- Scans `~/.codex/sessions/**/rollout-*.jsonl`.
+- Scans active rollouts in `~/.codex/sessions/**/rollout-*.jsonl`.
+- Scans archived rollouts in `~/.codex/archived_sessions/**/rollout-*.jsonl`.
 - Rebuilds missing or stale rows in `~/.codex/state_5.sqlite`.
 - Updates `~/.codex/session_index.jsonl`.
 - Aligns thread index rows to the current top-level `model_provider` in
   `~/.codex/config.toml`.
+- Also aligns any existing database rows still tied to an old provider, even if
+  their rollout file is not found.
 - Creates backups before writing local Codex state.
 - Exposes an MCP tool named `sync_codex_history`.
 - Runs one sync automatically when the plugin MCP server starts.
@@ -53,6 +56,15 @@ Print a machine-readable summary:
 ```bash
 python3 scripts/sync_history.py --json
 ```
+
+Important summary fields:
+
+- `provider_counts`: how many threads are indexed under each provider.
+- `remaining_provider_mismatches`: should be `0` after provider alignment.
+- `active_rollouts` and `archived_rollouts`: how many active and archived
+  rollout files were scanned.
+- `orphan_provider_aligned`: existing database rows fixed even when no matching
+  rollout was scanned.
 
 Use a custom Codex home:
 

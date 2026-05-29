@@ -9,10 +9,12 @@ Use this skill when the user says Codex history, local records, previous convers
 
 ## What It Does
 
-- Scans `~/.codex/sessions/**/rollout-*.jsonl`.
-- Rebuilds missing rows in `~/.codex/state_5.sqlite` `threads`.
+- Scans active rollouts in `~/.codex/sessions/**/rollout-*.jsonl`.
+- Scans archived rollouts in `~/.codex/archived_sessions/**/rollout-*.jsonl`.
+- Rebuilds missing or stale rows in `~/.codex/state_5.sqlite` `threads`.
 - Updates `~/.codex/session_index.jsonl`.
 - Aligns indexed rows to the current top-level `model_provider` in `~/.codex/config.toml` so they appear under the current user/provider.
+- Also aligns existing database rows still tied to an old provider, even if their rollout file is not found.
 - Creates backups under `~/.codex/backups/` before writing. If that directory is not writable, it falls back to the plugin's local `backups/` directory.
 
 ## Commands
@@ -30,3 +32,6 @@ python3 /path/to/codex-history-recover/scripts/sync_history.py
 ```
 
 The plugin also exposes an MCP tool named `sync_codex_history` and runs the same sync once when the MCP server starts.
+
+When checking a JSON sync result, `remaining_provider_mismatches` should be `0`.
+Use `provider_counts` to confirm old providers such as `custom` are gone.
