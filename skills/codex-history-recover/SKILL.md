@@ -14,6 +14,7 @@ Use this skill when the user says Codex history, local records, previous convers
 - Rebuilds missing or stale rows in `~/.codex/state_5.sqlite` `threads`.
 - Updates `~/.codex/session_index.jsonl`.
 - Aligns indexed rows to the current top-level `model_provider` in `~/.codex/config.toml` so they appear under the current user/provider.
+- Aligns rollout `session_meta.model_provider` values too, so Codex does not rebuild the database back to the old provider.
 - Also aligns existing database rows still tied to an old provider, even if their rollout file is not found.
 - Creates backups under `~/.codex/backups/` before writing. If that directory is not writable, it falls back to the plugin's local `backups/` directory.
 
@@ -35,3 +36,4 @@ The plugin also exposes an MCP tool named `sync_codex_history` and runs the same
 
 When checking a JSON sync result, `remaining_provider_mismatches` should be `0`.
 Use `provider_counts` to confirm old providers such as `custom` are gone.
+Use `rollout_provider_aligned` to confirm source rollout metadata was repaired.

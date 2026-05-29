@@ -69,6 +69,11 @@ def parse_args() -> argparse.Namespace:
         help="Do not rewrite thread rows to the current model_provider.",
     )
     parser.add_argument(
+        "--no-align-rollouts",
+        action="store_true",
+        help="Do not rewrite rollout session_meta model_provider values.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Scan and report changes without writing the sqlite database or index.",
@@ -270,7 +275,7 @@ def scan_rollout(
     fallback_created_ms = int(stat.st_ctime * 1000)
     fallback_updated_ms = int(stat.st_mtime * 1000)
     created_ms = parse_timestamp(meta.get("timestamp")) or fallback_created_ms
-    updated_ms = max(max_timestamp_ms, fallback_updated_ms, created_ms)
+    updated_ms = max(max_timestamp_ms, created_ms) if max_timestamp_ms else max(fallback_updated_ms, created_ms)
 
     current_provider = config.get("model_provider") or text_value(meta.get("model_provider"))
     original_provider = text_value(meta.get("model_provider")) or current_provider or "openai"
@@ -350,7 +355,11 @@ def writable_backup_dir(codex_home: Path) -> Path:
     raise RuntimeError("no writable backup directory found; " + "; ".join(errors))
 
 
-def backup_state(codex_home: Path, dry_run: bool) -> list[str]:
+def backup_state(
+    codex_home: Path,
+    dry_run: bool,
+    rollout_paths: list[Path] | None = None,
+) -> list[str]:
     if dry_run:
         return []
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -377,7 +386,102 @@ def backup_state(codex_home: Path, dry_run: bool) -> list[str]:
         shutil.copy2(index_path, backup_path)
         backups.append(str(backup_path))
 
+    if rollout_paths:
+        rollout_backup_root = backup_dir / f"rollouts.before-history-recover-{timestamp}"
+        for rollout_path in rollout_paths:
+            try:
+                relative_path = rollout_path.relative_to(codex_home)
+            except ValueError:
+                relative_path = Path(rollout_path.name)
+            backup_path = rollout_backup_root / relative_path
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(rollout_path, backup_path)
+        backups.append(str(rollout_backup_root))
+
     return backups
+
+
+def rollout_provider_change_paths(
+    rollouts: list[tuple[Path, bool]],
+    current_provider: str | None,
+    align_provider: bool,
+    align_rollouts: bool,
+) -> list[Path]:
+    if not align_provider or not align_rollouts or not current_provider:
+        return []
+
+    paths: list[Path] = []
+    for path, _ in rollouts:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if item.get("type") != "session_meta":
+                    continue
+                payload = item.get("payload")
+                if isinstance(payload, dict) and payload.get("model_provider") != current_provider:
+                    paths.append(path)
+                break
+    return paths
+
+
+def align_rollout_metadata(
+    paths: list[Path],
+    current_provider: str | None,
+    dry_run: bool,
+) -> dict[str, int]:
+    if not current_provider:
+        return {"rollout_provider_aligned": 0}
+
+    changed = 0
+    for path in paths:
+        if dry_run:
+            changed += 1
+            continue
+
+        tmp_path = path.with_name(path.name + ".history-recover.tmp")
+        file_changed = False
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as source:
+                with tmp_path.open("w", encoding="utf-8") as target:
+                    for line in source:
+                        output_line = line
+                        try:
+                            item = json.loads(line)
+                        except json.JSONDecodeError:
+                            target.write(output_line)
+                            continue
+
+                        if item.get("type") == "session_meta":
+                            payload = item.get("payload")
+                            if (
+                                isinstance(payload, dict)
+                                and payload.get("model_provider") != current_provider
+                            ):
+                                payload["model_provider"] = current_provider
+                                output_line = (
+                                    json.dumps(
+                                        item,
+                                        ensure_ascii=False,
+                                        separators=(",", ":"),
+                                    )
+                                    + "\n"
+                                )
+                                file_changed = True
+                        target.write(output_line)
+
+            if file_changed:
+                os.replace(tmp_path, path)
+                changed += 1
+            else:
+                tmp_path.unlink(missing_ok=True)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    return {"rollout_provider_aligned": changed}
 
 
 def ensure_threads_schema(conn: sqlite3.Connection) -> None:
@@ -602,8 +706,15 @@ def run_sync(args: argparse.Namespace) -> dict[str, Any]:
     config = parse_config(codex_home)
     current_provider = config.get("model_provider")
     align_provider = not args.no_align_provider
+    align_rollouts = align_provider and not args.no_align_rollouts
     title_index = read_title_index(codex_home)
     rollouts = discover_rollouts(codex_home)
+    rollout_paths_to_align = rollout_provider_change_paths(
+        rollouts,
+        current_provider,
+        align_provider,
+        align_rollouts,
+    )
 
     records: list[dict[str, Any]] = []
     skipped = 0
@@ -617,16 +728,18 @@ def run_sync(args: argparse.Namespace) -> dict[str, Any]:
         else:
             records.append(record)
 
+    rollout_stats = align_rollout_metadata(rollout_paths_to_align, current_provider, True)
     thread_stats = update_threads(codex_home, records, align_provider, current_provider, True)
     index_stats = update_session_index(codex_home, records, True)
     needs_write = any(
         thread_stats[key] > 0
         for key in ("inserted", "updated", "provider_aligned", "orphan_provider_aligned")
-    ) or index_stats["session_index_changed"] > 0
+    ) or rollout_stats["rollout_provider_aligned"] > 0 or index_stats["session_index_changed"] > 0
 
     backups: list[str] = []
     if not args.dry_run and needs_write:
-        backups = backup_state(codex_home, False)
+        backups = backup_state(codex_home, False, rollout_paths_to_align)
+        rollout_stats = align_rollout_metadata(rollout_paths_to_align, current_provider, False)
         thread_stats = update_threads(codex_home, records, align_provider, current_provider, False)
         index_stats = update_session_index(codex_home, records, False)
 
@@ -636,12 +749,14 @@ def run_sync(args: argparse.Namespace) -> dict[str, Any]:
         "codex_home": str(codex_home),
         "current_provider": current_provider,
         "align_provider": align_provider,
+        "align_rollouts": align_rollouts,
         "dry_run": args.dry_run,
         "scanned_rollouts": len(rollouts),
         "active_rollouts": active_rollouts,
         "archived_rollouts": archived_rollouts,
         "valid_threads": len(records),
         "skipped_rollouts": skipped,
+        **rollout_stats,
         **thread_stats,
         **index_stats,
         **inspection,
@@ -657,6 +772,7 @@ def print_summary(summary: dict[str, Any], as_json: bool, quiet: bool) -> None:
     line = (
         f"Codex history sync: {summary['valid_threads']} local threads scanned, "
         f"{summary['inserted']} inserted, {summary['updated']} updated, "
+        f"{summary['rollout_provider_aligned']} rollout files aligned, "
         f"{summary['provider_aligned']} aligned to provider {provider}, "
         f"{summary['remaining_provider_mismatches']} provider mismatches remain."
     )

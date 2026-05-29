@@ -18,6 +18,8 @@ rollout files and rebuilds the visible thread index.
 - Updates `~/.codex/session_index.jsonl`.
 - Aligns thread index rows to the current top-level `model_provider` in
   `~/.codex/config.toml`.
+- Aligns rollout `session_meta.model_provider` values too, because Codex can
+  rebuild the database from rollout metadata and otherwise re-hide old threads.
 - Also aligns any existing database rows still tied to an old provider, even if
   their rollout file is not found.
 - Creates backups before writing local Codex state.
@@ -61,6 +63,8 @@ Important summary fields:
 
 - `provider_counts`: how many threads are indexed under each provider.
 - `remaining_provider_mismatches`: should be `0` after provider alignment.
+- `rollout_provider_aligned`: how many rollout source files had their
+  `session_meta.model_provider` updated.
 - `active_rollouts` and `archived_rollouts`: how many active and archived
   rollout files were scanned.
 - `orphan_provider_aligned`: existing database rows fixed even when no matching

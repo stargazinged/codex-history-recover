@@ -10,7 +10,7 @@ from typing import Any
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SYNC_SCRIPT = PLUGIN_ROOT / "scripts" / "sync_history.py"
-SERVER_INFO = {"name": "codex-history-recover", "version": "0.1.1"}
+SERVER_INFO = {"name": "codex-history-recover", "version": "0.1.2"}
 
 
 def run_sync(*, dry_run: bool = False, align_provider: bool = True) -> tuple[bool, str]:
